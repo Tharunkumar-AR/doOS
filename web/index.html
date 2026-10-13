@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>doOS — Stanford Operating System</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div class="app-shell">
+
+  <!-- ============ SIDEBAR ============ -->
+  <nav class="sidebar">
+    <div class="brand" data-tauri-drag-region>
+      <span class="brand-mark">do</span><span class="brand-os">OS</span>
+    </div>
+    <div class="nav-links">
+      <button class="nav-link active" data-view="dashboard">🏠 <span>Dashboard</span></button>
+      <button class="nav-link" data-view="tasks">📥 <span>Inbox / Tasks</span></button>
+      <button class="nav-link" data-view="calendar">📅 <span>Calendar</span></button>
+      <button class="nav-link" data-view="habits">🔥 <span>Habits</span></button>
+      <button class="nav-link" data-view="kanban">🗂️ <span>Kanban</span></button>
+      <button class="nav-link" data-view="courses">🎓 <span>Courses & Life</span></button>
+      <button class="nav-link" data-view="quarters">🗓️ <span>Terms</span></button>
+      <button class="nav-link" data-view="settings">⚙️ <span>Settings</span><span class="nav-dot hidden" id="settingsBackupDot" title="Backup reminder"></span></button>
+    </div>
+    <div class="sidebar-footer">
+      <button id="quickAddBtn" class="btn btn-primary btn-block">+ Quick Add Task</button>
+    </div>
+  </nav>
+
+  <!-- ============ MAIN ============ -->
+  <main class="main">
+    <!-- Desktop (Tauri) build only: a plain, button-free strip so the
+         window can be dragged by its top edge above the main content --
+         the sidebar's own .brand logo (data-tauri-drag-region below)
+         covers the top-left; this covers the top-right. Harmless no-op
+         in the plain browser build. -->
+    <div class="titlebar-drag-strip" data-tauri-drag-region></div>
+    <div id="backupReminderBanner" class="backup-reminder hidden">
+      <span>⚠️ It's been a while since your last backup -- this data only lives in this browser.</span>
+      <button class="btn btn-sm btn-primary" id="backupReminderExportBtn">⬇ Export Now</button>
+      <button class="btn btn-sm btn-ghost" id="backupReminderDismissBtn">Dismiss for today</button>
+    </div>
+
+    <!-- Appears after any BATCH change (Smart Replan, AI Reschedule, bulk AI estimate) -- NOT after a single-task edit, which is easy to fix by hand. Single slot: a new batch op replaces whatever's here. -->
+    <div id="undoBatchBanner" class="batch-undo-banner hidden">
+      <span>↩ <span id="undoBatchLabel"></span> -- undo if that wasn't right.</span>
+      <button class="btn btn-sm btn-primary" id="undoBatchBtn">Undo</button>
+      <button class="btn btn-sm btn-ghost" id="dismissUndoBatchBtn">Dismiss</button>
+    </div>
+
+    <!-- Floating clock-in widget -- visible across every view (outside any .view section, same as the backup banner above), shown only while activeSession is non-null -->
+    <div id="activeSessionWidget" class="active-session-widget hidden">
+      <div class="asw-main">
+        <span class="asw-title" id="aswTaskTitle"></span>
+        <span class="asw-elapsed" id="aswElapsed"></span>
+        <span class="pomodoro-phase" id="aswPhase"></span>
+      </div>
+      <button class="btn btn-sm btn-primary" id="aswClockOutBtn">⏸ Clock Out</button>
+    </div>
+
+    <!-- ---------- DASHBOARD ---------- -->
+    <section class="view" id="view-dashboard">
+      <header class="view-header">
+        <div>
+          <h1>Today's Focus</h1>
+          <p class="subtitle" id="dashDateLine"></p>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-primary hidden" id="canvasSyncAllBtnDash" title="Sync assignments from every Canvas course mapped to a doOS course">🔄 Sync Canvas</button>
+          <span class="badge" id="activeTermBadge">—</span>
+        </div>
+      </header>
+
+      <div class="card hidden" id="dashEmptyState">
+        <div style="text-align:center;padding:28px 16px;">
+          <h3 style="margin-top:0;">Nothing set up yet</h3>
+          <p class="hint">doOS starts blank on purpose -- add your current term and a course or two to get going.</p>
+          <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:14px;">
+            <button class="btn btn-primary" onclick="openQuarterModal(null)">+ Add a Term</button>
+            <button class="btn btn-ghost" onclick="openCourseModal(null)">+ Add a Course</button>
+            <button class="btn btn-ghost" onclick="openTaskModal(null)">+ Add a Task</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="dash-grid" id="dashGrid">
+        <div class="card card-span-2" id="todayGlanceCard">
+          <div id="todayGlance" class="glance-strip"></div>
+        </div>
+
+        <div class="card card-span-2">
+          <div class="card-head">
+            <div>
+              <h3>📆 Today's Agenda</h3>
+              <span class="card-sub">Overdue first, then classes, then flexible work by energy</span>
+            </div>
+            <button class="btn btn-ghost btn-sm" id="smartReplanBtn" title="Pull every overdue task back into view, tagged Backlog -- fits what it can into today by reschedulability, bumps the rest to tomorrow">↻ Smart Replan</button>
+            <button class="btn btn-ghost btn-sm hidden" id="aiRescheduleBtn" title="Ask AI to propose a reschedule plan for at-risk tasks -- you review and approve every change before anything moves">🤖 AI Reschedule</button>
+          </div>
+          <div id="focusList" class="task-list"></div>
+        </div>
+
+        <div class="card card-span-2 ai-insights-card" id="aiInsightsCard">
+          <div class="card-head">
+            <div>
+              <h3>✨ AI Insights</h3>
+              <span class="card-sub" id="aiInsightsHeadline"></span>
+            </div>
+            <button class="btn btn-ghost btn-sm hidden" id="aiInsightsRefreshBtn" title="Fetch new insights">↻ Refresh</button>
+          </div>
+          <div id="aiInsightsBody"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h3>📊 Today's Workload</h3>
+            <button class="btn btn-ghost btn-sm" id="workloadRecalcBtn" title="Force a fresh recompute, in case this is showing a stale number">↻ Recalculate</button>
+          </div>
+          <div id="workloadMeter"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h3>⚖️ Remaining Workload</h3>
+            <div class="segmented" id="remainingWorkloadRangeToggle" title="How far out to count open work -- a bigger-picture view of what's still on your plate">
+              <button class="seg-btn seg-btn-xs" data-range="day">Day</button>
+              <button class="seg-btn seg-btn-xs" data-range="3day">3-Day</button>
+              <button class="seg-btn seg-btn-xs" data-range="week">Week</button>
+              <button class="seg-btn seg-btn-xs active" data-range="all">All Time</button>
+            </div>
+          </div>
+          <div id="remainingWorkloadMeter"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>🔮 Estimate Accuracy</h3><span class="card-sub">From your own task history</span></div>
+          <div id="accuracyInsight"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>🙋 Need Help @ Office Hours</h3></div>
+          <div id="needHelpList" class="task-list task-list-compact"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>🔥 Habit Streaks</h3><a class="card-sub" style="cursor:pointer;" onclick="switchView('habits')">View all →</a></div>
+          <div id="streaksList" class="task-list task-list-compact"></div>
+        </div>
+
+        <div class="card card-span-2">
+          <div class="card-head"><h3>🎓 Course Progress</h3></div>
+          <div id="courseProgressList"></div>
+        </div>
+
+        <div class="card card-span-2">
+          <div class="card-head"><h3>📌 Midterms & Finals</h3></div>
+          <div id="upcomingExamsList" class="task-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- KANBAN ---------- -->
+    <section class="view hidden" id="view-kanban">
+      <header class="view-header">
+        <div><h1>Kanban Board</h1><p class="subtitle">Drag cards to reschedule or change status</p></div>
+        <div class="header-actions">
+          <div class="segmented" id="kanbanModeToggle">
+            <button class="seg-btn active" data-mode="status">By Status</button>
+            <button class="seg-btn" data-mode="day">Day</button>
+            <button class="seg-btn" data-mode="week">Week</button>
+          </div>
+          <button class="btn btn-ghost hidden" id="kanbanPrev">‹ Prev</button>
+          <button class="btn btn-ghost hidden" id="kanbanToday">Today</button>
+          <button class="btn btn-ghost hidden" id="kanbanNext">Next ›</button>
+        </div>
+      </header>
+      <div id="kanbanBoard" class="kanban-board"></div>
+    </section>
+
+    <!-- ---------- HABITS ---------- -->
+    <section class="view hidden" id="view-habits">
+      <header class="view-header">
+        <div><h1>🔥 Habits</h1><p class="subtitle">Simple daily check-ins -- did you do it, yes or no.</p></div>
+        <div class="header-actions">
+          <div class="habit-range-nav">
+            <button class="btn btn-ghost btn-sm" id="habitsPrevRange" title="Previous 4 months">‹</button>
+            <span id="habitsRangeLabel" class="habit-range-label"></span>
+            <button class="btn btn-ghost btn-sm" id="habitsNextRange" title="Next 4 months">›</button>
+          </div>
+          <button class="btn btn-primary" id="habitsAddBtn">+ New Habit</button>
+        </div>
+      </header>
+      <div id="habitsEmptyState" class="card hidden">
+        <div style="text-align:center;padding:28px 16px;">
+          <h3 style="margin-top:0;">No habits yet</h3>
+          <p class="hint">Track something simple -- exercise, read, drink water, whatever. No due dates, no estimates, just a daily yes/no and a streak.</p>
+          <button class="btn btn-primary" onclick="openHabitModal(null)" style="margin-top:10px;">+ Add your first habit</button>
+        </div>
+      </div>
+      <div id="habitsContainer" class="habits-grid"></div>
+    </section>
+
+    <!-- ---------- CALENDAR ---------- -->
+    <section class="view hidden" id="view-calendar">
+      <header class="view-header">
+        <div><h1>Calendar</h1><p class="subtitle" id="calendarWeekLabel"></p></div>
+        <div class="header-actions">
+          <div class="segmented" id="calendarModeToggle">
+            <button class="seg-btn" data-mode="day">Day</button>
+            <button class="seg-btn active" data-mode="week">Week</button>
+            <button class="seg-btn" data-mode="month">Month</button>
+          </div>
+          <button class="btn btn-ghost" id="calPrevWeek">‹ Prev</button>
+          <button class="btn btn-ghost" id="calToday">Today</button>
+          <button class="btn btn-ghost" id="calNextWeek">Next ›</button>
+        </div>
+      </header>
+      <div id="calendarGrid" class="calendar-grid"></div>
+    </section>
+
+    <!-- ---------- TASKS / INBOX ---------- -->
+    <section class="view hidden" id="view-tasks">
+      <header class="view-header">
+        <div><h1>Inbox / Tasks</h1><p class="subtitle">Grouped by day -- filter it down below</p></div>
+        <div class="header-actions">
+          <button class="btn btn-primary hidden" id="canvasSyncAllBtnInbox" title="Sync assignments from every Canvas course mapped to a doOS course">🔄 Sync Canvas</button>
+          <button class="btn btn-ghost" id="smartPlanBtn" title="Auto-schedule every unscheduled task with a due date and est. hours, splitting across days as needed">🪄 Smart Plan</button>
+          <button class="btn btn-ghost hidden" id="aiAddTaskBtn" title="Describe a task (or a change to an existing one) in plain text -- AI drafts it, you review and approve before anything is created or changed">✨ Add with AI</button>
+          <button class="btn btn-primary" id="tasksAddBtn">+ New Task</button>
+        </div>
+      </header>
+
+      <div class="filter-bar">
+        <select id="filterCourse"><option value="">All Courses/Categories</option></select>
+        <select id="filterType"><option value="">All Types</option></select>
+        <select id="filterStatus"><option value="">All Statuses</option></select>
+        <select id="filterEnergy"><option value="">All Energy</option></select>
+        <label class="checkbox-inline"><input type="checkbox" id="filterNeedHelp"> Need Help only</label>
+        <label class="checkbox-inline"><input type="checkbox" id="filterHideDone" checked> Hide Done/Cancelled</label>
+        <label class="checkbox-inline" title="Canvas assignments that are Done/Cancelled, so the default Inbox filters hide them -- check this to audit them regardless of every other filter above">
+          <input type="checkbox" id="filterCanvasHidden"> 🎓 Canvas, hidden from Inbox
+        </label>
+        <input type="search" id="filterSearch" placeholder="Search tasks…">
+      </div>
+
+      <div id="taskListContainer" class="task-list-view"></div>
+    </section>
+
+    <!-- ---------- COURSES ---------- -->
+    <section class="view hidden" id="view-courses">
+      <header class="view-header">
+        <div><h1>Courses & Life Categories</h1><p class="subtitle">Classes, labs, clubs, jobs, and life projects</p></div>
+        <div class="header-actions">
+          <button class="btn btn-primary" id="coursesAddBtn">+ New Course/Category</button>
+        </div>
+      </header>
+      <div id="coursesGrid" class="courses-by-term"></div>
+    </section>
+
+    <!-- ---------- QUARTERS ---------- -->
+    <section class="view hidden" id="view-quarters">
+      <header class="view-header">
+        <div><h1>Terms</h1><p class="subtitle">Autumn · Winter · Spring · Summer</p></div>
+        <div class="header-actions">
+          <button class="btn btn-primary" id="quartersAddBtn">+ New Term</button>
+        </div>
+      </header>
+      <div id="quartersContainer" class="quarters-list"></div>
+    </section>
+
+    <!-- ---------- SETTINGS ---------- -->
+    <section class="view hidden" id="view-settings">
+      <header class="view-header"><div><h1>Settings</h1></div></header>
+
+      <div class="card">
+        <div class="card-head"><h3>🎨 Appearance</h3></div>
+        <label>Theme
+          <select id="themeInput">
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+            <option value="system">Match System</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>📊 Weekly Capacity</h3></div>
+        <label>Target study hours per week: <input type="number" id="capacityInput" min="1" max="120" style="width:70px"></label>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>⏱ Pomodoro Timer</h3></div>
+        <p class="hint">Used whenever you Clock In to a task -- the focus/break phase is just a display + toast reminder, it never pauses the actual tracked time.</p>
+        <label>Focus minutes: <input type="number" id="pomodoroFocusInput" min="1" max="180" style="width:70px"></label>
+        <label>Break minutes: <input type="number" id="pomodoroBreakInput" min="1" max="60" style="width:70px"></label>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>✨ AI Assistant (optional, bring your own key)</h3></div>
+        <p class="hint"><strong>This is the one deliberate exception to doOS being fully local.</strong> Everything else in this app stays on your device -- nothing is ever sent anywhere. If you turn this on, every time you ask for a daily insight or an AI-estimated task duration, a small, compact snippet of your schedule/task data is sent directly from your browser to whichever provider you pick below, using an API key you provide and pay for yourself. doOS never sees or stores that key anywhere but this browser's local storage, and nothing is sent unless you explicitly click a button that asks for it.</p>
+        <div class="form-row">
+          <label>Provider
+            <select id="aiProviderInput">
+              <option value="anthropic">Claude</option>
+              <option value="openai">ChatGPT</option>
+              <option value="gemini">Gemini</option>
+            </select>
+          </label>
+          <label>API Key
+            <span class="ai-key-row">
+              <input type="password" id="aiApiKeyInput" placeholder="Paste your API key" autocomplete="off">
+              <button type="button" class="btn btn-ghost btn-xs" id="aiKeyToggleBtn">Show</button>
+            </span>
+          </label>
+        </div>
+        <button class="btn btn-ghost" id="aiTestConnectionBtn">Test Connection</button>
+        <p class="hint" id="aiTestStatusLine"></p>
+
+        <div class="card-head" style="margin-top:16px;"><h4>Fill In Missing Estimates</h4></div>
+        <p class="hint">Finds every flexible (non-fixed-time) task that doesn't have an Est. Hours yet, and asks the AI to predict one for each -- grounded in the task's type, course, and your own past durations for similar work where you have any. Processed in batches of several dozen tasks per API call, not one call per task.</p>
+        <button class="btn btn-ghost" id="aiBulkEstimateBtn">✨ Fill in missing estimates</button>
+        <button class="btn btn-ghost hidden" id="aiBulkEstimateCancelBtn">Cancel</button>
+        <p class="hint" id="aiBulkEstimateStatusLine"></p>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>🎓 Canvas Integration (optional, bring your own token)</h3></div>
+        <p class="hint"><strong>Browser build limitation:</strong> Canvas doesn't allow direct requests from a browser-based app like this one (confirmed -- its hosted instances never send the CORS headers a browser requires, and there's no opt-in the way some AI providers have). The desktop (Tauri) app routes around this through its own native networking and works fully; the plain browser build will show a clear error instead of silently doing nothing.</p>
+        <p class="hint">Paste in your institution's Canvas URL and a personal access token (Canvas -> Account -> Settings -> "+ New Access Token"). Used only to call your own institution's Canvas API directly from your browser with your own token -- doOS never sees or stores it anywhere but this browser's local storage.</p>
+        <div class="form-row">
+          <label>Canvas URL
+            <input type="text" id="canvasBaseUrlInput" placeholder="yourschool.instructure.com">
+          </label>
+          <label>Access Token
+            <span class="ai-key-row">
+              <input type="password" id="canvasApiTokenInput" placeholder="Paste your access token" autocomplete="off">
+              <button type="button" class="btn btn-ghost btn-xs" id="canvasTokenToggleBtn">Show</button>
+            </span>
+          </label>
+        </div>
+        <button class="btn btn-ghost" id="canvasTestConnectionBtn">Test Connection</button>
+        <p class="hint" id="canvasTestStatusLine"></p>
+        <p class="hint">Once connected, map a Canvas course to a doOS course from that course's own edit screen (Courses & Life). Each mapped course can be synced individually from there, or all at once below.</p>
+        <label class="checkbox-inline"><input type="checkbox" id="canvasAutosyncInput"> Autosync mapped courses on launch (throttled to once every 30 min)</label>
+        <div class="form-row">
+          <label>Schedule imports this many days before their due date
+            <input type="number" id="canvasScheduleLeadDaysInput" min="0" step="1" style="width:80px">
+          </label>
+          <label>Import up to this many weeks into the future
+            <input type="number" id="canvasImportWeeksAheadInput" min="1" step="1" style="width:80px">
+          </label>
+        </div>
+        <label class="checkbox-inline"><input type="checkbox" id="canvasImportUndatedInput"> Import assignments with no due date (off by default)</label>
+        <div class="form-row">
+          <button class="btn btn-ghost" id="canvasSyncAllBtn">🔄 Sync All Mapped Courses Now</button>
+        </div>
+        <p class="hint" id="canvasSyncAllStatusLine"></p>
+      </div>
+
+      <div class="card hidden" id="desktopAppCard">
+        <div class="card-head"><h3>🖥️ Desktop App</h3></div>
+        <p class="hint">doOS lives in the menu bar -- click the tray icon (or <strong id="clockShortcutLabel"></strong> from anywhere) to clock in/out of whatever you were most recently tracking without switching windows.</p>
+        <label class="checkbox-inline"><input type="checkbox" id="autostartToggle"> Launch doOS when I log in</label>
+        <label class="checkbox-inline"><input type="checkbox" id="pomodoroNotifyToggle"> Show an OS notification on each focus/break change (on top of the in-app toast)</label>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>🌱 Example Starter Data</h3></div>
+        <p class="hint">doOS loads a small example term/courses/tasks automatically the very first time you open it with nothing in it yet -- no manual steps, and it never re-loads itself over real content you've since added. If you want to get back to that example layout (e.g. after clearing everything, or just to see it again), use this button. <strong>This replaces whatever is currently in the app.</strong></p>
+        <button class="btn btn-primary" id="loadSampleSeedBtn">⬇ Load Example Data</button>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>📅 Calendars</h3></div>
+        <p class="hint">Import a .ics calendar file, or try subscribing to a feed URL. Most calendar providers (Google, Outlook, iCloud) block direct browser fetches with CORS -- if subscribing fails, download the .ics from your provider and use "Import File" instead. URL-based calendars refresh only when you click Refresh, not automatically.</p>
+        <div id="calendarsList"></div>
+        <div class="calendar-add-row">
+          <label class="btn btn-ghost" for="calendarFileInput">+ Import .ics File</label>
+          <input type="file" id="calendarFileInput" accept=".ics" hidden>
+          <input type="text" id="calendarUrlInput" placeholder="https://... .ics feed URL">
+          <button class="btn btn-ghost" id="calendarUrlSubscribeBtn">Subscribe</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>💾 Backup</h3></div>
+        <p class="hint">Every change saves to this browser's local storage the instant you make it -- there's no "unsaved" state that a closed tab could lose. What local storage <em>can't</em> survive is clearing this browser's site data, reinstalling, or switching to a different browser/device. An exported JSON file is the only thing that protects against that -- export one regularly.</p>
+        <p class="hint" id="backupStatusLine" style="font-weight:700;color:var(--text);"></p>
+        <button class="btn btn-primary" id="exportJsonBtn">⬇ Export Backup (JSON)</button>
+        <button class="btn btn-ghost" id="restoreBackupBtn">⬆ Restore from Backup</button>
+        <input type="file" id="importJsonInput" accept=".json" hidden>
+
+        <div class="card-head" style="margin-top:16px;"><h4>Local Auto-Backups</h4></div>
+        <p class="hint">doOS also keeps up to 5 recent snapshots inside this browser automatically (roughly every 10 minutes of active use), so a bad import or bug can be rolled back without needing a manual export. These live in the same browser storage, though -- they're a safety net for in-app mistakes, not a substitute for the export above.</p>
+        <div id="autoBackupList"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>⚠️ Danger Zone</h3></div>
+        <button class="btn btn-danger" id="resetDataBtn">Clear all data</button>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>ℹ️ About</h3></div>
+        <p class="hint">doOS <span id="appVersionLine"></span> -- a local-first student planner. Everything lives in this browser's own storage; nothing is sent anywhere except the optional, explicitly opt-in AI and Canvas integrations above.</p>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- ============ MODAL: Task editor ============ -->
+<div class="modal-backdrop hidden" id="taskModalBackdrop">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="taskModalTitle">New Task</h3>
+      <button class="modal-close" data-close="taskModalBackdrop" data-autosave="true">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="taskId">
+      <div class="readonly-banner hidden" id="taskReadonlyBanner">📅 Imported from a subscribed calendar — it's not editable here. Manage the calendar itself under Settings → Calendars.</div>
+      <fieldset class="task-form-fieldset" id="taskFormFieldset">
+      <label>Task Name
+        <input type="text" id="taskName" placeholder="e.g. CS106B PSET 4">
+      </label>
+      <div class="form-row">
+        <label>Type
+          <select id="taskType">
+            <option>PSET</option><option>Lab/Prelab</option><option>Exam/Quiz</option>
+            <option>Reading</option><option>Lecture Videos</option><option>Club Meeting</option><option>Project Milestone</option>
+            <option>Study/Review/Practice</option><option>Habit</option><option>Class</option>
+            <option>ToDo</option><option>Personal Task</option>
+          </select>
+        </label>
+        <label>Course/Category
+          <select id="taskCourse"><option value="">— None —</option></select>
+        </label>
+      </div>
+      <div class="form-row">
+        <label>Due Date
+          <input type="date" id="taskDueDate">
+          <span class="quick-date-row">
+            <button type="button" class="btn btn-ghost btn-xs" onclick="setTaskDueDateQuick(0)">Today</button>
+            <button type="button" class="btn btn-ghost btn-xs" onclick="setTaskDueDateQuick(1)">Tomorrow</button>
+            <button type="button" class="btn btn-ghost btn-xs" onclick="setTaskDueDateQuick(2)">In 2 Days</button>
+          </span>
+        </label>
+        <label>Scheduled Date <span class="label-hint">(follows Due Date unless changed)</span><input type="date" id="taskScheduledDate"></label>
+      </div>
+      <div class="form-row">
+        <label>Start Time <span class="label-hint">(fixed class/event -- blocks this time)</span><input type="time" id="taskStartTime"></label>
+        <label>End Time <input type="time" id="taskEndTime"></label>
+      </div>
+      <div class="form-row">
+        <label><span id="taskEstHoursLabel">Est. Hours</span> <input type="number" id="taskEstHours" step="0.25" min="0"></label>
+        <label>Actual Hours <input type="number" id="taskActualHours" step="0.25" min="0"></label>
+      </div>
+      <div id="estimateHint" class="estimate-hint hidden"></div>
+      <div id="aiEstimateRow" class="ai-estimate-row hidden">
+        <button type="button" class="btn btn-ghost btn-sm" id="aiEstimateBtn">✨ Ask AI for an estimate</button>
+      </div>
+      <div id="aiEstimateHint" class="ai-hint hidden"></div>
+
+      <div class="hidden" id="taskClockSection">
+        <div class="clock-track-row">
+          <span class="label-hint">Time Tracking</span>
+          <div id="taskClockControl" class="clock-control"></div>
+        </div>
+        <div class="time-log-section" id="timeLogSection">
+          <div class="time-log-header"><span>⏱ Time Log</span></div>
+          <div id="timeLogRowsContainer"></div>
+        </div>
+      </div>
+
+      <div class="form-row split-row hidden" id="splitRow">
+        <label>Split across
+          <span class="split-input-wrap">
+            <input type="number" id="splitDays" min="2" max="14" value="2" style="width:60px">
+            <span>consecutive day(s)</span>
+          </span>
+        </label>
+        <button type="button" class="btn btn-ghost btn-sm" id="splitTaskBtn">Split Task</button>
+      </div>
+      <div class="form-row">
+        <label>Energy
+          <select id="taskEnergy">
+            <option value="high">⚡ High Focus</option>
+            <option value="medium">☕ Medium</option>
+            <option value="low">😴 Low Energy</option>
+          </select>
+        </label>
+        <label>Priority
+          <select id="taskPriority"><option>High</option><option>Medium</option><option>Low</option></select>
+        </label>
+      </div>
+      <div class="form-row">
+        <label>Status
+          <select id="taskStatus">
+            <option>Backlog</option><option>To Do</option><option>In Progress</option>
+            <option>Waiting/Blocked</option><option>Done</option><option>Cancelled</option>
+          </select>
+        </label>
+        <label class="checkbox-inline align-bottom"><input type="checkbox" id="taskNeedHelp"> Need Help @ Office Hours</label>
+      </div>
+
+      <fieldset class="recurrence-fieldset">
+        <label class="checkbox-inline"><input type="checkbox" id="taskRecurs"> Repeats</label>
+        <div id="recurrenceOptions" class="hidden">
+          <div class="form-row">
+            <label>Frequency
+              <select id="recFreq"><option value="daily">Daily</option><option value="weekly">Weekly</option></select>
+            </label>
+            <label>Every <input type="number" id="recInterval" min="1" value="1" style="width:60px"> <span id="recIntervalUnit">day(s)</span></label>
+          </div>
+          <div id="recWeekdaysRow" class="form-row weekday-picker hidden">
+            <label><input type="checkbox" value="1" class="recDay"> Mon</label>
+            <label><input type="checkbox" value="2" class="recDay"> Tue</label>
+            <label><input type="checkbox" value="3" class="recDay"> Wed</label>
+            <label><input type="checkbox" value="4" class="recDay"> Thu</label>
+            <label><input type="checkbox" value="5" class="recDay"> Fri</label>
+            <label><input type="checkbox" value="6" class="recDay"> Sat</label>
+            <label><input type="checkbox" value="0" class="recDay"> Sun</label>
+          </div>
+          <div class="form-row">
+            <label>Ends On (optional) <input type="date" id="recEndDate"></label>
+          </div>
+        </div>
+      </fieldset>
+
+      <div class="subtasks-editor">
+        <div class="exams-editor-head">
+          <span>☑️ Subtasks</span>
+          <button type="button" class="btn btn-ghost btn-sm" id="addSubtaskBtn">+ Add Subtask</button>
+        </div>
+        <div id="subtaskRowsContainer"></div>
+      </div>
+
+      <label>Notes <textarea id="taskNotes" rows="2"></textarea></label>
+      </fieldset>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-danger hidden" id="deleteTaskBtn">Delete</button>
+      <button class="btn btn-ghost hidden" id="cancelTaskBtn">Cancel Task</button>
+      <button class="btn btn-ghost hidden" id="uncancelTaskBtn">Uncancel</button>
+      <button class="btn btn-ghost" data-close="taskModalBackdrop">Close</button>
+      <button class="btn btn-primary" id="saveTaskBtn">Save Task</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: recurring task delete/cancel scope -- "just this occurrence" vs "this and every future occurrence" ============ -->
+<div class="modal-backdrop hidden" id="recurrenceActionModalBackdrop">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="recurrenceActionTitle">Recurring task</h3>
+      <button class="modal-close" data-close="recurrenceActionModalBackdrop">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint" id="recurrenceActionBody"></p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" data-close="recurrenceActionModalBackdrop">Nevermind</button>
+      <button class="btn btn-ghost" id="recurrenceActionJustThisBtn">Just This Occurrence</button>
+      <button class="btn btn-danger" id="recurrenceActionAllFutureBtn">This + All Future</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: AI Add/Edit Task -- free-text input ============ -->
+<div class="modal-backdrop hidden" id="aiAddTaskModalBackdrop">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>✨ Add Task with AI</h3>
+      <button class="modal-close" data-close="aiAddTaskModalBackdrop">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint">Describe one or more tasks, or a change to something you already have -- e.g. "PSET 4 for CS106B due Friday, about 3 hours" or "push HW 2 to Monday and mark the reading done." AI drafts it, you approve before anything changes.</p>
+      <label>What do you need?
+        <textarea id="aiAddTaskInput" rows="4" placeholder="Type whatever's on your mind..."></textarea>
+      </label>
+      <p class="hint" id="aiAddTaskStatusLine"></p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" data-close="aiAddTaskModalBackdrop">Cancel</button>
+      <button class="btn btn-primary" id="aiAddTaskGenerateBtn">✨ Generate</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: AI Add/Edit Task review -- every proposed new task or edit shown here, nothing applies until the student approves it ============ -->
+<div class="modal-backdrop hidden" id="aiAddTaskReviewModalBackdrop">
+  <div class="modal modal-wide">
+    <div class="modal-head">
+      <h3>✨ Review Proposed Tasks</h3>
+      <button class="modal-close" data-close="aiAddTaskReviewModalBackdrop">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint">Each item below is clearly a new task or an edit to something you already have -- uncheck anything you don't want, then apply only what's checked.</p>
+      <div id="aiAddTaskRowsContainer" class="ai-reschedule-rows"></div>
+    </div>
+    <div class="modal-footer">
+      <span class="hint" id="aiAddTaskSelectedCount"></span>
+      <button class="btn btn-ghost" data-close="aiAddTaskReviewModalBackdrop">Cancel</button>
+      <button class="btn btn-primary" id="applyAiAddTaskBtn">Apply Selected</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: AI Reschedule review -- every suggested move shown here, nothing applies until the student approves it ============ -->
+<div class="modal-backdrop hidden" id="aiRescheduleModalBackdrop">
+  <div class="modal modal-wide">
+    <div class="modal-head">
+      <h3>🤖 AI Reschedule Proposal</h3>
+      <button class="modal-close" data-close="aiRescheduleModalBackdrop">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint">Review each suggested move below -- uncheck anything you don't want, then apply only what's checked.</p>
+      <p class="ai-reschedule-quote hidden" id="aiRescheduleQuote"></p>
+      <div id="aiRescheduleRowsContainer" class="ai-reschedule-rows"></div>
+    </div>
+    <div class="modal-footer">
+      <span class="hint" id="aiRescheduleSelectedCount"></span>
+      <button class="btn btn-ghost" data-close="aiRescheduleModalBackdrop">Cancel</button>
+      <button class="btn btn-primary" id="applyAiRescheduleBtn">Apply Selected</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: Course editor ============ -->
+<div class="modal-backdrop hidden" id="courseModalBackdrop">
+  <div class="modal">
+    <div class="modal-head"><h3 id="courseModalTitle">New Course/Category</h3><button class="modal-close" data-close="courseModalBackdrop" data-autosave="true">×</button></div>
+    <div class="modal-body">
+      <input type="hidden" id="courseId">
+      <label>Name <input type="text" id="courseName" placeholder="e.g. CS106B - Programming Abstractions"></label>
+      <div class="form-row">
+        <label>Type
+          <select id="courseType"></select>
+        </label>
+        <label>Code/Identifier <input type="text" id="courseCode" placeholder="CS106B"></label>
+      </div>
+      <div class="form-row">
+        <label>Units/Credits <input type="number" id="courseUnits" min="0" step="1"></label>
+        <label>Target Grade <input type="text" id="courseTargetGrade" placeholder="A"></label>
+      </div>
+      <label>Location/Zoom <input type="text" id="courseLocation"></label>
+      <label>Instructor/Lead <input type="text" id="courseInstructor"></label>
+      <div class="form-row">
+        <label>Term
+          <select id="courseQuarter"></select>
+        </label>
+        <label>Status <select id="courseStatus"><option>Active</option><option>Archived</option></select></label>
+      </div>
+      <label>Color
+        <div class="color-picker-row">
+          <div class="color-presets" id="colorPresets"></div>
+          <input type="color" id="courseColor" value="#8b5cf6" title="Custom color">
+        </div>
+      </label>
+
+      <div class="exams-editor">
+        <div class="exams-editor-head">
+          <span>🕐 Class Schedule <span class="label-hint">(when this actually meets each week -- drives the Dashboard's class count and workload hours)</span></span>
+          <button type="button" class="btn btn-ghost btn-sm" id="addMeetingBtn">+ Add Meeting Time</button>
+        </div>
+        <div id="meetingRowsContainer"></div>
+      </div>
+
+      <div class="exams-editor">
+        <div class="exams-editor-head">
+          <span>📌 Midterms & Finals</span>
+          <button type="button" class="btn btn-ghost btn-sm" id="addExamBtn">+ Add Exam</button>
+        </div>
+        <div id="examRowsContainer"></div>
+      </div>
+
+      <div class="exams-editor">
+        <div class="exams-editor-head"><span>🎓 Canvas</span></div>
+        <div id="courseCanvasNotConfigured" class="hint hidden">Connect Canvas in <a style="cursor:pointer;text-decoration:underline;" onclick="hideModal('courseModalBackdrop'); switchView('settings')">Settings</a> first to map this course and pull in its assignments.</div>
+        <div id="courseCanvasMappingRow" class="hidden">
+          <div class="form-row">
+            <label>Canvas Course
+              <select id="courseCanvasIdInput"><option value="">— Not mapped —</option></select>
+            </label>
+            <button type="button" class="btn btn-ghost" id="courseCanvasSyncBtn" style="align-self:flex-end;">↻ Sync Assignments Now</button>
+          </div>
+          <p class="hint" id="courseCanvasSyncStatusLine"></p>
+        </div>
+      </div>
+
+      <div class="exams-editor">
+        <div class="exams-editor-head"><span>📋 Tasks for this Course</span></div>
+        <div id="courseTasksContainer"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-danger hidden" id="deleteCourseBtn">Delete</button>
+      <button class="btn btn-ghost" data-close="courseModalBackdrop">Cancel</button>
+      <button class="btn btn-primary" id="saveCourseBtn">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: Quarter editor ============ -->
+<div class="modal-backdrop hidden" id="quarterModalBackdrop">
+  <div class="modal">
+    <div class="modal-head"><h3 id="quarterModalTitle">New Term</h3><button class="modal-close" data-close="quarterModalBackdrop" data-autosave="true">×</button></div>
+    <div class="modal-body">
+      <input type="hidden" id="quarterId">
+      <label>Term Name <input type="text" id="quarterName" placeholder="Autumn 2026"></label>
+      <div class="form-row">
+        <label>Academic Year <input type="text" id="quarterYear" placeholder="2026-2027"></label>
+        <label>Season
+          <select id="quarterSeason"><option>Autumn</option><option>Winter</option><option>Spring</option><option>Summer</option></select>
+        </label>
+      </div>
+      <div class="form-row">
+        <label>Start Date <input type="date" id="quarterStart"></label>
+        <label>End Date <input type="date" id="quarterEnd"></label>
+      </div>
+      <label>Status <select id="quarterStatus"><option>Active</option><option>Upcoming</option><option>Archived</option></select></label>
+      <label>Notes <textarea id="quarterNotes" rows="2"></textarea></label>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-danger hidden" id="deleteQuarterBtn">Delete</button>
+      <button class="btn btn-ghost" data-close="quarterModalBackdrop">Cancel</button>
+      <button class="btn btn-primary" id="saveQuarterBtn">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: Habit editor ============ -->
+<div class="modal-backdrop hidden" id="habitModalBackdrop">
+  <div class="modal">
+    <div class="modal-head"><h3 id="habitModalTitle">New Habit</h3><button class="modal-close" data-close="habitModalBackdrop" data-autosave="true">×</button></div>
+    <div class="modal-body">
+      <input type="hidden" id="habitId">
+      <label>Habit Name <input type="text" id="habitName" placeholder="e.g. Exercise, Read, Drink water"></label>
+      <div class="form-row">
+        <label>Goal
+          <select id="habitGoalType">
+            <option value="daily">Every day</option>
+            <option value="weekly">A certain number of times per week</option>
+          </select>
+        </label>
+        <label id="habitWeeklyTargetRow">Times per week <input type="number" id="habitWeeklyTarget" min="1" max="7" value="3" style="width:70px"></label>
+      </div>
+      <label>Color
+        <div class="color-picker-row">
+          <div class="color-presets" id="habitColorPresets"></div>
+          <input type="color" id="habitColor" value="#8b5cf6" title="Custom color">
+        </div>
+      </label>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-danger hidden" id="deleteHabitBtn">Delete</button>
+      <button class="btn btn-ghost" data-close="habitModalBackdrop">Cancel</button>
+      <button class="btn btn-primary" id="saveHabitBtn">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="js/sample-seed-data.js"></script>
+<script src="js/db.js"></script>
+<script src="js/recurrence.js"></script>
+<script src="js/habits.js"></script>
+<script src="js/istudiez.js"></script><script src="js/estimator.js"></script>
+<script src="js/ai.js"></script>
+<script src="js/canvas.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/planner.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

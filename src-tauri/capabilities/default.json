@@ -1,0 +1,28 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "enables the default permissions",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "store:default",
+    "notification:default",
+    "dialog:default",
+    "fs:write-all",
+    "fs:read-all",
+    "autostart:default",
+    {
+      "identifier": "http:default",
+      "allow": [
+        { "url": "https://*" },
+        { "url": "https://*.instructure.com" },
+        { "url": "https://api.anthropic.com" },
+        { "url": "https://generativelanguage.googleapis.com" },
+        { "url": "https://api.openai.com" }
+      ]
+    }
+  ]
+}
